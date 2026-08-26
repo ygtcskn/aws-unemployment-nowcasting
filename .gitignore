@@ -1,0 +1,14 @@
+.venv/
+.idea/
+
+# Raw data stays local / S3
+data/raw/
+
+__pycache__/
+*.pyc
+
+.env
+.aws/
+credentials
+
+.ipynb_checkpoints/
