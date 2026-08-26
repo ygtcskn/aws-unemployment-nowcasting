@@ -698,7 +698,8 @@ def load_unemployment_rates(path=UNEMPLOYMENT_FILE):
 
 
 def combine_with_unemployment(panel, unemployment, target_mode):
-    """Merge unemployment and construct the selected forecasting target."""
+    """Merge unemployment, add AR(1), and construct the forecasting target."""
+
     if target_mode not in UNEMPLOYMENT_TARGET_MODES:
         raise ValueError(
             f"Unknown unemployment target mode {target_mode!r}; "
@@ -707,34 +708,89 @@ def combine_with_unemployment(panel, unemployment, target_mode):
 
     panel_countries = set(panel["country"].unique())
     unemployment_countries = set(unemployment["country"].unique())
-    missing_countries = sorted(panel_countries - unemployment_countries)
+
+    missing_countries = sorted(
+        panel_countries - unemployment_countries
+    )
+
     if missing_countries:
         raise ValueError(
-            f"Unemployment source is missing retained countries: {missing_countries}"
+            f"Unemployment source is missing retained countries: "
+            f"{missing_countries}"
         )
 
     relevant_unemployment = unemployment[
         unemployment["country"].isin(panel_countries)
     ]
-    combined = panel.merge(
-        relevant_unemployment,
-        on=["date", "country"],
-        how="left",
-        validate="one_to_one",
-    ).sort_values(["country", "date"]).copy()
 
-    grouped = combined.groupby("country", sort=False)
-    previous_rate = grouped["unemployment_rate"].shift(1)
-    following_rate = grouped["unemployment_rate"].shift(-1)
-    previous_date = grouped["date"].shift(1)
-    following_date = grouped["date"].shift(-1)
-    current_month = combined["date"].dt.year * 12 + combined["date"].dt.month
-    previous_month = previous_date.dt.year * 12 + previous_date.dt.month
-    following_month = following_date.dt.year * 12 + following_date.dt.month
+    combined = (
+        panel.merge(
+            relevant_unemployment,
+            on=["date", "country"],
+            how="left",
+            validate="one_to_one",
+        )
+        .sort_values(["country", "date"])
+        .copy()
+    )
 
-    # An isolated missing month is filled from its two neighbours. This keeps
-    # the monthly change interpretable without extrapolating longer data gaps.
-    interpolated_values = (previous_rate + following_rate) / 2.0
+
+    # ========================================================
+    # INTERPOLATE ISOLATED ONE-MONTH UNEMPLOYMENT GAPS
+    # ========================================================
+
+    grouped = combined.groupby(
+        "country",
+        sort=False
+    )
+
+    previous_rate = grouped[
+        "unemployment_rate"
+    ].shift(1)
+
+    following_rate = grouped[
+        "unemployment_rate"
+    ].shift(-1)
+
+    previous_date = grouped[
+        "date"
+    ].shift(1)
+
+    following_date = grouped[
+        "date"
+    ].shift(-1)
+
+
+    current_month = (
+        combined["date"].dt.year * 12
+        + combined["date"].dt.month
+    )
+
+    previous_month = (
+        previous_date.dt.year * 12
+        + previous_date.dt.month
+    )
+
+    following_month = (
+        following_date.dt.year * 12
+        + following_date.dt.month
+    )
+
+
+    # Isolated missing month:
+    #
+    # t-1 exists
+    # t missing
+    # t+1 exists
+    #
+    # -> interpolate using neighbours
+
+    interpolated_values = (
+        previous_rate
+        + following_rate
+    ) / 2.0
+
+
     interpolated_mask = (
         combined["unemployment_rate"].isna()
         & previous_rate.notna()
@@ -742,42 +798,167 @@ def combine_with_unemployment(panel, unemployment, target_mode):
         & current_month.sub(previous_month).eq(1)
         & following_month.sub(current_month).eq(1)
     )
+
+
     interpolated_rate_keys = combined.loc[
-        interpolated_mask, ["date", "country"]
+        interpolated_mask,
+        ["date", "country"]
     ].copy()
-    interpolated_rate_keys["imputed_value"] = interpolated_values.loc[
+
+
+    interpolated_rate_keys[
+        "imputed_value"
+    ] = interpolated_values.loc[
         interpolated_mask
     ].to_numpy()
-    combined.loc[interpolated_mask, "unemployment_rate"] = interpolated_values.loc[
+
+
+    combined.loc[
+        interpolated_mask,
+        "unemployment_rate"
+    ] = interpolated_values.loc[
         interpolated_mask
     ]
 
+
+    # ========================================================
+    # REPORT REMAINING UNEMPLOYMENT GAPS
+    # ========================================================
+
     remaining_rate_gaps = combined.loc[
-        combined["unemployment_rate"].isna(), ["date", "country"]
+        combined["unemployment_rate"].isna(),
+        ["date", "country"]
     ].copy()
 
+
+    # ========================================================
+    # AR(1) FEATURE
+    #
+    # unemployment_rate_lag1 = u_(t-1)
+    #
+    # Construct AFTER interpolation so an interpolated
+    # unemployment observation can correctly serve as t-1.
+    # ========================================================
+
+    grouped = combined.groupby(
+        "country",
+        sort=False
+    )
+
+    previous_rate = grouped[
+        "unemployment_rate"
+    ].shift(1)
+
+    previous_date = grouped[
+        "date"
+    ].shift(1)
+
+
+    previous_month = (
+        previous_date.dt.year * 12
+        + previous_date.dt.month
+    )
+
+
+    adjacent_month = (
+        current_month
+        .sub(previous_month)
+        .eq(1)
+    )
+
+
+    combined[
+        "unemployment_rate_lag1"
+    ] = previous_rate.where(
+        adjacent_month
+    )
+
+
+    # ========================================================
+    # TARGET
+    # ========================================================
+
     if target_mode == "change_1m":
-        # In changes, a random walk is simply a zero-change benchmark. This is
-        # the preferred target for LASSO and tree-based forecasting models.
-        grouped = combined.groupby("country", sort=False)
-        previous_rate = grouped["unemployment_rate"].shift(1)
-        adjacent_month = current_month.sub(previous_month).eq(1)
 
-        target_column = "unemployment_change_1m"
-        combined[target_column] = (
-            combined["unemployment_rate"] - previous_rate
-        ).where(adjacent_month)
-        combined = combined.drop(columns=["unemployment_rate"])
+        # ----------------------------------------------------
+        # Target:
+        #
+        # Δu_t = u_t - u_(t-1)
+        #
+        # AR(1) level remains available as a predictor.
+        # ----------------------------------------------------
+
+        target_column = (
+            "unemployment_change_1m"
+        )
+
+
+        combined[
+            target_column
+        ] = (
+            combined["unemployment_rate"]
+            - combined["unemployment_rate_lag1"]
+        )
+
+
+        # Raw contemporaneous unemployment cannot be a
+        # predictor because it is the quantity being nowcast.
+        combined = combined.drop(
+            columns=["unemployment_rate"]
+        )
+
     else:
-        target_column = "unemployment_rate"
 
-    before_drop = len(combined)
-    combined = combined.dropna(subset=[target_column]).copy()
-    target_rows_dropped = before_drop - len(combined)
-    combined = combined.sort_values(["date", "country"]).reset_index(drop=True)
+        # ----------------------------------------------------
+        # Raw unemployment rate is the target.
+        #
+        # Predictor:
+        # unemployment_rate_lag1
+        # ----------------------------------------------------
+
+        target_column = (
+            "unemployment_rate"
+        )
+
+
+    # ========================================================
+    # DROP ROWS WITHOUT TARGET OR AR(1)
+    # ========================================================
+
+    before_drop = len(
+        combined
+    )
+
+
+    combined = combined.dropna(
+        subset=[
+            target_column,
+            "unemployment_rate_lag1",
+        ]
+    ).copy()
+
+
+    target_rows_dropped = (
+        before_drop
+        - len(combined)
+    )
+
+
+    combined = (
+        combined
+        .sort_values(
+            ["date", "country"]
+        )
+        .reset_index(drop=True)
+    )
+
 
     if combined.empty:
-        raise ValueError(f"No rows remain for unemployment target {target_mode!r}.")
+        raise ValueError(
+            f"No rows remain for unemployment "
+            f"target {target_mode!r}."
+        )
+
 
     return (
         combined,
@@ -823,7 +1004,8 @@ def parse_args():
             "the same configured final filename."
         ),
     )
-    return parser.parse_args()
+    args, _ = parser.parse_known_args()
+    return args
 
 
 def main(unemployment_target=DEFAULT_UNEMPLOYMENT_TARGET):

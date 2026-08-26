@@ -19,7 +19,7 @@ DATA_PATH = Path(
 )
 
 OUTPUT_DIR = Path(
-    "data/results"
+    "output"
 )
 
 OUTPUT_FILE = (
