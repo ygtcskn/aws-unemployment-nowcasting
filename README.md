@@ -13,7 +13,9 @@ reports/
 |-- outputs/                         # Predictions, metrics, models and tuning files
 |   `-- tuning/                      # Optuna best settings and trial histories
 |-- figures/
-|   `-- model_metric_comparison.png  # RMSE, MAE and MAPE comparison
+|   |-- model_metric_comparison.png  # RMSE, MAE and MAPE comparison
+|   |-- de_actual_vs_predicted.png   # Germany: actual and model forecasts
+|   `-- us_actual_vs_predicted.png   # United States: actual and model forecasts
 `-- tables/
     `-- model_comparison.xlsx        # One workbook comparing all models
 ```

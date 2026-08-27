@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -28,6 +29,7 @@ KEY_COLUMNS = ["date", "country"]
 PREDICTION_COLUMNS = ["date", "country", "model", "actual", "prediction"]
 LEVEL_LAG_COLUMN = "unemployment_rate_lag1"
 TARGET_COLUMN = "unemployment_change_1m"
+COUNTRY_PLOTS = {"DE": "Germany", "US": "United States"}
 
 NAVY = "16324F"
 BLUE = "2E6F9E"
@@ -478,6 +480,95 @@ def create_metric_figure(metrics, figure_path):
     plt.close(figure)
 
 
+def create_country_forecast_figure(predictions, country_code, country_name, path):
+    country = predictions[predictions["country"].eq(country_code)].copy()
+    if country.empty:
+        raise ValueError(f"No common-sample predictions are available for {country_code}.")
+
+    models = [
+        str(model)
+        for model in predictions["model"].cat.categories
+        if country["model"].eq(model).any()
+    ]
+    actual_spread = country.groupby("date")["actual_level"].agg(
+        lambda values: values.max() - values.min()
+    )
+    if actual_spread.gt(1e-9).any():
+        raise ValueError(f"Models disagree on the actual unemployment rate for {country_code}.")
+
+    plotted_values = country[["actual_level", "prediction_level"]].to_numpy()
+    lower = float(np.nanmin(plotted_values))
+    upper = float(np.nanmax(plotted_values))
+    margin = max((upper - lower) * 0.08, 0.25)
+    model_colors = [f"#{BLUE}", f"#{GREEN}", f"#{AMBER}", "#8B5E83", "#607D8B"]
+
+    column_count = 2
+    row_count = (len(models) + column_count - 1) // column_count
+    figure, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(15, 3.4 * row_count + 1.2),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+    axes = axes.ravel()
+    for axis, model, color in zip(axes, models, model_colors):
+        sample = country[country["model"].eq(model)].sort_values("date")
+        axis.plot(
+            sample["date"],
+            sample["actual_level"],
+            color=f"#{INK}",
+            linewidth=1.8,
+            label="Actual",
+            zorder=3,
+        )
+        axis.plot(
+            sample["date"],
+            sample["prediction_level"],
+            color=color,
+            linewidth=1.25,
+            alpha=0.9,
+            label="Forecast",
+            zorder=2,
+        )
+        axis.set_title(model, fontsize=12, weight="bold", color=f"#{INK}")
+        axis.set_ylim(lower - margin, upper + margin)
+        axis.grid(True, linestyle="--", alpha=0.3)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.tick_params(axis="both", labelsize=9, colors=f"#{MUTED}")
+        axis.xaxis.set_major_locator(mdates.YearLocator(3))
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        axis.legend(frameon=False, loc="upper left", ncol=2, fontsize=8)
+
+    for axis in axes[len(models):]:
+        axis.axis("off")
+    for axis in axes[::2]:
+        if axis.axison:
+            axis.set_ylabel("Unemployment rate (%)", fontsize=9, color=f"#{MUTED}")
+
+    figure.suptitle(
+        f"{country_name}: Actual vs Forecast Unemployment Rate",
+        fontsize=18,
+        weight="bold",
+        color=f"#{NAVY}",
+        y=0.98,
+    )
+    figure.text(
+        0.5,
+        0.025,
+        "One-month-ahead rate forecasts reconstructed as "
+        "u(t-1) + predicted monthly change. All panels use the common sample.",
+        ha="center",
+        fontsize=9,
+        color=f"#{MUTED}",
+    )
+    figure.subplots_adjust(left=0.08, right=0.98, top=0.91, bottom=0.08, hspace=0.24)
+    figure.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
 def create_qa_previews(metrics, predictions, qa_dir):
     qa_dir.mkdir(parents=True, exist_ok=True)
     display = metrics.copy()
@@ -578,6 +669,13 @@ def main():
     build_workbook(predictions, metrics, workbook_path)
     validate_workbook(workbook_path, len(metrics), len(predictions))
     create_metric_figure(metrics, figure_path)
+    country_figure_paths = []
+    for country_code, country_name in COUNTRY_PLOTS.items():
+        country_path = figures_dir / f"{country_code.lower()}_actual_vs_predicted.png"
+        create_country_forecast_figure(
+            predictions, country_code, country_name, country_path
+        )
+        country_figure_paths.append(country_path)
     if args.qa_dir:
         create_qa_previews(metrics, predictions, args.qa_dir.resolve())
 
@@ -589,6 +687,8 @@ def main():
     print(display.to_string(index=False, float_format=lambda value: f"{value:.4f}"))
     print(f"\nWorkbook: {workbook_path}")
     print(f"Figure:   {figure_path}")
+    for path in country_figure_paths:
+        print(f"Figure:   {path}")
 
 
 if __name__ == "__main__":

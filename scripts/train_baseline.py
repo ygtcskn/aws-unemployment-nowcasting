@@ -9,7 +9,6 @@ from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
 
 from model_utils import (
-    add_target_lags,
     evaluate_predictions,
     load_model_panel,
     prediction_frame,
@@ -23,7 +22,6 @@ from model_utils import (
 DATA_PATH = Path("data/final/gt_unemp_monthly_final.csv")
 OUTPUT_DIR = Path("reports/outputs")
 WINDOW_MONTHS = 60
-AR_LAGS = 1
 
 
 def parse_args():
@@ -31,17 +29,12 @@ def parse_args():
     parser.add_argument("--data", type=Path, default=DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--window-months", type=int, default=WINDOW_MONTHS)
-    parser.add_argument("--ar-lags", type=int, default=AR_LAGS)
     parser.add_argument("--test-start-date")
     return parser.parse_args()
 
 
-def main(data_path, output_dir, window_months, ar_lags, test_start_date=None):
-    if ar_lags < 1:
-        raise ValueError("ar_lags must be at least 1.")
-
+def main(data_path, output_dir, window_months, test_start_date=None):
     data, target, base_features = load_model_panel(data_path)
-    data, lag_columns = add_target_lags(data, target, ar_lags)
     country_dummies = [column for column in base_features if column.startswith("C_")]
 
     level_lag = "unemployment_rate_lag1"
@@ -49,10 +42,7 @@ def main(data_path, output_dir, window_months, ar_lags, test_start_date=None):
         raise ValueError(
             f"The change target requires {level_lag} for the level AR(1)."
         )
-    ar_specs = [
-        ("AR(1)", [level_lag] + country_dummies),
-        (f"AR-change({ar_lags})", lag_columns + country_dummies),
-    ]
+    ar_features = [level_lag] + country_dummies
 
     splits = rolling_month_splits(data, window_months)
     test_start = None
@@ -84,12 +74,9 @@ def main(data_path, output_dir, window_months, ar_lags, test_start_date=None):
                 )
             )
 
-        for model_name, ar_features in ar_specs:
-            ar_train = train.dropna(subset=ar_features + [target]).copy()
-            ar_test = test.dropna(subset=ar_features + [target]).copy()
-            if ar_train.empty or ar_test.empty:
-                continue
-
+        ar_train = train.dropna(subset=ar_features + [target]).copy()
+        ar_test = test.dropna(subset=ar_features + [target]).copy()
+        if not ar_train.empty and not ar_test.empty:
             model = LinearRegression()
             model.fit(ar_train[ar_features], ar_train[target])
             ar_prediction = model.predict(ar_test[ar_features])
@@ -98,7 +85,7 @@ def main(data_path, output_dir, window_months, ar_lags, test_start_date=None):
                     ar_test,
                     ar_test[target],
                     ar_prediction,
-                    model_name,
+                    "AR(1)",
                     train_months,
                 )
             )
@@ -128,6 +115,5 @@ if __name__ == "__main__":
         args.data,
         args.output_dir,
         args.window_months,
-        args.ar_lags,
         args.test_start_date,
     )
