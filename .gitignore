@@ -4,6 +4,7 @@
 # Raw data stays local / S3
 data/raw/
 data/final/
+reports/outputs/
 
 __pycache__/
 *.pyc

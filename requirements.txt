@@ -1,0 +1,11 @@
+boto3
+lightgbm
+matplotlib
+numpy
+openpyxl
+optuna
+pandas
+scikit-learn
+statsmodels
+tqdm
+xgboost

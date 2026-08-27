@@ -4,7 +4,6 @@ The script cleans Google Trends data, builds a balanced panel, and adds a
 seasonally adjusted OECD unemployment target. Run it from the project root.
 """
 
-import argparse
 import re
 from collections import Counter
 from io import StringIO
@@ -29,8 +28,9 @@ RAW_PREFIX = "raw/google_trends/"
 FINAL_DIR = Path("data/final")
 UNEMPLOYMENT_FILE = Path("data/raw/unemp/unemp_raw.csv")
 UNEMPLOYMENT_FINAL_FILE = FINAL_DIR / "gt_unemp_monthly_final.csv"
-UNEMPLOYMENT_TARGET_MODES = ("change_1m", "raw")
-DEFAULT_UNEMPLOYMENT_TARGET = "change_1m"
+UNEMPLOYMENT_TARGET_COLUMN = "unemployment_change_1m"
+UNEMPLOYMENT_LEVEL_COLUMN = "unemployment_rate"
+UNEMPLOYMENT_LEVEL_LAG_COLUMN = "unemployment_rate_lag1"
 
 # These exclusions define the estimation sample. The affordable-housing topic
 # is removed because its break adjustment collapses the Italian series to zero.
@@ -697,14 +697,8 @@ def load_unemployment_rates(path=UNEMPLOYMENT_FILE):
     )
 
 
-def combine_with_unemployment(panel, unemployment, target_mode):
-    """Merge unemployment, add AR(1), and construct the forecasting target."""
-
-    if target_mode not in UNEMPLOYMENT_TARGET_MODES:
-        raise ValueError(
-            f"Unknown unemployment target mode {target_mode!r}; "
-            f"choose from {sorted(UNEMPLOYMENT_TARGET_MODES)}."
-        )
+def combine_with_unemployment(panel, unemployment):
+    """Merge unemployment and construct the monthly-change target."""
 
     panel_countries = set(panel["country"].unique())
     unemployment_countries = set(unemployment["country"].unique())
@@ -868,7 +862,7 @@ def combine_with_unemployment(panel, unemployment, target_mode):
 
 
     combined[
-        "unemployment_rate_lag1"
+        UNEMPLOYMENT_LEVEL_LAG_COLUMN
     ] = previous_rate.where(
         adjacent_month
     )
@@ -878,47 +872,17 @@ def combine_with_unemployment(panel, unemployment, target_mode):
     # TARGET
     # ========================================================
 
-    if target_mode == "change_1m":
+    # The models explain the monthly change, while the lagged unemployment
+    # level remains available for the random walk and level AR(1) benchmark.
+    target_column = UNEMPLOYMENT_TARGET_COLUMN
+    combined[target_column] = (
+        combined[UNEMPLOYMENT_LEVEL_COLUMN]
+        - combined[UNEMPLOYMENT_LEVEL_LAG_COLUMN]
+    )
 
-        # ----------------------------------------------------
-        # Target:
-        #
-        # Δu_t = u_t - u_(t-1)
-        #
-        # AR(1) level remains available as a predictor.
-        # ----------------------------------------------------
-
-        target_column = (
-            "unemployment_change_1m"
-        )
-
-
-        combined[
-            target_column
-        ] = (
-            combined["unemployment_rate"]
-            - combined["unemployment_rate_lag1"]
-        )
-
-
-        # Raw contemporaneous unemployment cannot be a
-        # predictor because it is the quantity being nowcast.
-        combined = combined.drop(
-            columns=["unemployment_rate"]
-        )
-
-    else:
-
-        # ----------------------------------------------------
-        # Raw unemployment rate is the target.
-        #
-        # Predictor:
-        # unemployment_rate_lag1
-        # ----------------------------------------------------
-
-        target_column = (
-            "unemployment_rate"
-        )
+    # The current unemployment rate is the outcome being nowcast, so keeping
+    # it among the predictors would create direct look-ahead bias.
+    combined = combined.drop(columns=[UNEMPLOYMENT_LEVEL_COLUMN])
 
 
     # ========================================================
@@ -933,7 +897,7 @@ def combine_with_unemployment(panel, unemployment, target_mode):
     combined = combined.dropna(
         subset=[
             target_column,
-            "unemployment_rate_lag1",
+            UNEMPLOYMENT_LEVEL_LAG_COLUMN,
         ]
     ).copy()
 
@@ -955,8 +919,7 @@ def combine_with_unemployment(panel, unemployment, target_mode):
 
     if combined.empty:
         raise ValueError(
-            f"No rows remain for unemployment "
-            f"target {target_mode!r}."
+            f"No rows remain for target {UNEMPLOYMENT_TARGET_COLUMN!r}."
         )
 
 
@@ -990,25 +953,7 @@ def validate_combined_panel(
     return summary
 
 
-# --- Command-line entry point ---
-
-def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--unemployment-target",
-        choices=UNEMPLOYMENT_TARGET_MODES,
-        default=DEFAULT_UNEMPLOYMENT_TARGET,
-        help=(
-            "Target to append: 'change_1m' (recommended percentage-point "
-            "change) or 'raw' (seasonally adjusted rate). Both modes write "
-            "the same configured final filename."
-        ),
-    )
-    args, _ = parser.parse_known_args()
-    return args
-
-
-def main(unemployment_target=DEFAULT_UNEMPLOYMENT_TARGET):
+def main():
     """Run the complete preparation pipeline and save the modeling panel."""
     s3_client = boto3.client("s3", region_name=REGION)
 
@@ -1036,7 +981,7 @@ def main(unemployment_target=DEFAULT_UNEMPLOYMENT_TARGET):
         target_rows_dropped,
         interpolated_rate_keys,
         remaining_rate_gaps,
-    ) = combine_with_unemployment(panel, unemployment, unemployment_target)
+    ) = combine_with_unemployment(panel, unemployment)
     summary = validate_combined_panel(
         combined,
         features,
@@ -1077,7 +1022,6 @@ def main(unemployment_target=DEFAULT_UNEMPLOYMENT_TARGET):
     )
 
     print("-" * 72)
-    print(f"Unemployment target mode: {unemployment_target}")
     print(f"Target column: {summary['target_column']}")
     print(f"Interpolated one-month rate gaps: {len(interpolated_rate_keys):,}")
     if not interpolated_rate_keys.empty:
@@ -1095,5 +1039,4 @@ def main(unemployment_target=DEFAULT_UNEMPLOYMENT_TARGET):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args.unemployment_target)
+    main()

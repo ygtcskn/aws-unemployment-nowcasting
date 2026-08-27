@@ -1,657 +1,227 @@
+"""Estimate a pooled LightGBM model with rolling out-of-sample forecasts."""
+
+import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
+from tqdm import tqdm
+
+from model_utils import (
+    add_target_lags,
+    evaluate_predictions,
+    exclude_target_lag_features,
+    load_model_panel,
+    load_tuned_config,
+    prediction_frame,
+    print_evaluation,
+    rolling_month_splits,
+    save_evaluation,
+    select_window,
 )
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-DATA_PATH = Path(
-    "data/final/gt_unemp_monthly_final.csv"
-)
-
-OUTPUT_DIR = Path(
-    "output"
-)
-
-OUTPUT_FILE = (
-    OUTPUT_DIR
-    / "lightgbm_predictions.csv"
-)
-
-COUNTRY_METRICS_FILE = (
-    OUTPUT_DIR
-    / "lightgbm_country_metrics.csv"
-)
-
-DATE_COL = "date"
-COUNTRY_COL = "country"
-TARGET_COL = "unemployment_rate"
-
-# Fixed rolling window:
-# previous 60 months -> predict next month
+DATA_PATH = Path("data/final/gt_unemp_monthly_final.csv")
+OUTPUT_DIR = Path("reports/outputs")
 WINDOW_MONTHS = 60
-
+TARGET_LAGS = 1
+N_ESTIMATORS = 300
 RANDOM_STATE = 42
-
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-df = pd.read_csv(
-    DATA_PATH,
-    parse_dates=[DATE_COL],
-)
-
-df = (
-    df
-    .sort_values(
-        [DATE_COL, COUNTRY_COL]
-    )
-    .reset_index(drop=True)
-)
-
-
-# ============================================================
-# BASIC CHECKS
-# ============================================================
-
-required_columns = {
-    DATE_COL,
-    COUNTRY_COL,
-    TARGET_COL,
+DEFAULT_MODEL_PARAMS = {
+    "n_estimators": N_ESTIMATORS,
+    "learning_rate": 0.03,
+    "num_leaves": 15,
+    "max_depth": 4,
+    "min_child_samples": 30,
+    "min_split_gain": 0.0,
+    "subsample": 0.8,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.6,
+    "reg_alpha": 0.1,
+    "reg_lambda": 5.0,
+    "max_bin": 255,
 }
 
-missing_required = (
-    required_columns
-    - set(df.columns)
-)
 
-if missing_required:
-    raise ValueError(
-        f"Missing required columns: "
-        f"{missing_required}"
-    )
-
-
-print(
-    "\n========================================"
-)
-
-print(
-    "POOLED LIGHTGBM ROLLING-WINDOW MODEL"
-)
-
-print(
-    "========================================"
-)
-
-print(
-    f"\nDataset: {DATA_PATH}"
-)
-
-print(
-    f"Rows: {len(df)}"
-)
-
-print(
-    f"Countries: "
-    f"{df[COUNTRY_COL].nunique()}"
-)
-
-print(
-    f"Sample: "
-    f"{df[DATE_COL].min().date()} "
-    f"to "
-    f"{df[DATE_COL].max().date()}"
-)
-
-
-# ============================================================
-# COUNTRY DUMMIES
-# ============================================================
-
-df = pd.get_dummies(
-    df,
-    columns=[COUNTRY_COL],
-    prefix="country",
-    dtype=float,
-)
-
-country_dummy_cols = [
-    col
-    for col in df.columns
-    if col.startswith("country_")
-]
-
-
-# ============================================================
-# DEFINE FEATURES
-# ============================================================
-
-exclude_cols = {
-    DATE_COL,
-    TARGET_COL,
-}
-
-FEATURES = [
-    col
-    for col in df.columns
-    if col not in exclude_cols
-]
-
-
-print(
-    f"\nNumber of predictors: "
-    f"{len(FEATURES)}"
-)
-
-
-# ============================================================
-# MODEL DATA
-# ============================================================
-
-model_df = df[
-    [DATE_COL, TARGET_COL]
-    + FEATURES
-].copy()
-
-
-# Target must be observed
-model_df = model_df.dropna(
-    subset=[TARGET_COL]
-)
-
-
-# ============================================================
-# UNIQUE MONTHS
-# ============================================================
-
-months = (
-    model_df[DATE_COL]
-    .drop_duplicates()
-    .sort_values()
-    .reset_index(drop=True)
-)
-
-
-if len(months) <= WINDOW_MONTHS:
-    raise ValueError(
-        f"Only {len(months)} months available. "
-        f"Need more than {WINDOW_MONTHS} months."
-    )
-
-
-print(
-    f"Total months: {len(months)}"
-)
-
-print(
-    f"Rolling window: "
-    f"{WINDOW_MONTHS} months"
-)
-
-print(
-    f"Out-of-sample months: "
-    f"{len(months) - WINDOW_MONTHS}"
-)
-
-
-# ============================================================
-# ROLLING WINDOW
-# ============================================================
-
-all_predictions = []
-
-
-for test_idx in range(
-    WINDOW_MONTHS,
-    len(months),
-):
-
-    # --------------------------------------------------------
-    # TRAIN / TEST MONTHS
-    # --------------------------------------------------------
-
-    train_months = months.iloc[
-        test_idx - WINDOW_MONTHS:
-        test_idx
-    ]
-
-    test_month = months.iloc[
-        test_idx
-    ]
-
-    train_start = (
-        train_months.iloc[0]
-    )
-
-    train_end = (
-        train_months.iloc[-1]
-    )
-
-
-    # --------------------------------------------------------
-    # POOLED TRAIN / TEST DATA
-    # --------------------------------------------------------
-
-    train = model_df[
-        model_df[DATE_COL].isin(
-            train_months
-        )
-    ].copy()
-
-    test = model_df[
-        model_df[DATE_COL]
-        == test_month
-    ].copy()
-
-
-    if train.empty or test.empty:
-        continue
-
-
-    # --------------------------------------------------------
-    # X / y
-    # --------------------------------------------------------
-
-    X_train = train[
-        FEATURES
-    ].copy()
-
-    y_train = train[
-        TARGET_COL
-    ].copy()
-
-    X_test = test[
-        FEATURES
-    ].copy()
-
-    y_test = test[
-        TARGET_COL
-    ].copy()
-
-
-    # --------------------------------------------------------
-    # KEEP COMPLETE FEATURE ROWS
-    #
-    # LightGBM can technically handle NaNs, but this keeps
-    # the setup consistent and explicit.
-    # --------------------------------------------------------
-
-    train_valid = (
-        X_train
-        .notna()
-        .all(axis=1)
-        & y_train.notna()
-    )
-
-    test_valid = (
-        X_test
-        .notna()
-        .all(axis=1)
-        & y_test.notna()
-    )
-
-
-    X_train = (
-        X_train.loc[
-            train_valid
-        ]
-    )
-
-    y_train = (
-        y_train.loc[
-            train_valid
-        ]
-    )
-
-    X_test = (
-        X_test.loc[
-            test_valid
-        ]
-    )
-
-    y_test = (
-        y_test.loc[
-            test_valid
-        ]
-    )
-
-
-    if X_train.empty:
-        print(
-            f"Skipping {test_month.date()}: "
-            f"no valid training observations."
-        )
-        continue
-
-    if X_test.empty:
-        print(
-            f"Skipping {test_month.date()}: "
-            f"no valid test observations."
-        )
-        continue
-
-
-    # ========================================================
-    # LIGHTGBM
-    # ========================================================
-
-    model = LGBMRegressor(
-
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", type=Path, default=DATA_PATH)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--window-months", type=int)
+    parser.add_argument("--target-lags", type=int)
+    parser.add_argument("--n-estimators", type=int)
+    parser.add_argument("--params-file", type=Path)
+    parser.add_argument("--test-start-date")
+    return parser.parse_args()
+
+
+def make_model(model_params=None):
+    params = DEFAULT_MODEL_PARAMS.copy()
+    if model_params:
+        unknown = set(model_params) - set(params)
+        if unknown:
+            raise ValueError(f"Unsupported LightGBM parameters: {sorted(unknown)}")
+        params.update(model_params)
+
+    return LGBMRegressor(
         objective="regression",
-
-        # Number of boosting trees
-        n_estimators=500,
-
-        # Shrinkage
-        learning_rate=0.03,
-
-        # Tree complexity
-        num_leaves=31,
-        max_depth=-1,
-
-        # Minimum observations in leaves
-        min_child_samples=20,
-
-        # Feature / observation subsampling
-        subsample=0.8,
-        colsample_bytree=0.8,
-
-        # Regularisation
-        reg_alpha=0.1,
-        reg_lambda=1.0,
-
         random_state=RANDOM_STATE,
-
-        # Use all available CPU cores
         n_jobs=-1,
-
-        # Reduce console output
         verbosity=-1,
+        deterministic=True,
+        force_col_wise=True,
+        **params,
     )
 
 
-    # --------------------------------------------------------
-    # TRAIN
-    # --------------------------------------------------------
-
-    model.fit(
-        X_train,
-        y_train,
-    )
-
-
-    # --------------------------------------------------------
-    # PREDICT NEXT MONTH
-    # --------------------------------------------------------
-
-    predictions = model.predict(
-        X_test
-    )
-
-
-    # --------------------------------------------------------
-    # RECOVER COUNTRY
-    # --------------------------------------------------------
-
-    test_country_dummies = (
-        X_test[
-            country_dummy_cols
-        ]
-    )
-
-    country_names = (
-        test_country_dummies
-        .idxmax(axis=1)
-        .str.replace(
-            "country_",
-            "",
-            regex=False,
+def main(
+    data_path,
+    output_dir,
+    window_months=None,
+    target_lags=None,
+    n_estimators=None,
+    params_file=None,
+    test_start_date=None,
+):
+    data, target, features = load_model_panel(data_path)
+    features = exclude_target_lag_features(features, target)
+    tuned_params = {}
+    tuned_test_start = None
+    if params_file is not None:
+        tuned_params, tuned_test_start, _ = load_tuned_config(
+            params_file, "lightgbm", target
         )
+
+    tuned_window = tuned_params.pop("window_months", None)
+    tuned_lags = tuned_params.pop("target_lags", None)
+    window_months = (
+        window_months
+        if window_months is not None
+        else tuned_window if tuned_window is not None else WINDOW_MONTHS
+    )
+    target_lags = (
+        target_lags
+        if target_lags is not None
+        else tuned_lags if tuned_lags is not None else TARGET_LAGS
+    )
+    model_params = DEFAULT_MODEL_PARAMS.copy()
+    model_params.update(tuned_params)
+    if n_estimators is not None:
+        model_params["n_estimators"] = n_estimators
+    if model_params["n_estimators"] < 1:
+        raise ValueError("n_estimators must be positive.")
+
+    if test_start_date is not None:
+        test_start = pd.Timestamp(test_start_date)
+        if pd.isna(test_start):
+            raise ValueError("test_start_date is invalid.")
+    else:
+        test_start = tuned_test_start
+    if (
+        tuned_test_start is not None
+        and test_start is not None
+        and test_start < tuned_test_start
+    ):
+        raise ValueError(
+            "test_start_date cannot precede the holdout start saved by Optuna."
+        )
+
+    data, lag_columns = add_target_lags(data, target, target_lags)
+    features = list(dict.fromkeys(features + lag_columns))
+    splits = rolling_month_splits(data, window_months)
+    if test_start is not None:
+        splits = [split for split in splits if pd.Timestamp(split[1]) >= test_start]
+        if not splits:
+            raise ValueError("No forecast months remain on or after test_start_date.")
+
+    predictions = []
+    importances = []
+    final_model = None
+
+    for train_months, test_month in tqdm(
+        splits, desc="Rolling LightGBM", unit="month"
+    ):
+        train, test = select_window(data, train_months, test_month)
+        train = train.dropna(subset=features + [target]).copy()
+        test = test.dropna(subset=features + [target]).copy()
+        if train.empty or test.empty:
+            continue
+
+        model = make_model(model_params)
+        model.fit(train[features], train[target])
+        forecast = model.predict(test[features])
+        predictions.append(
+            prediction_frame(
+                test, test[target], forecast, "LightGBM", train_months
+            )
+        )
+
+        gain = model.booster_.feature_importance(importance_type="gain")
+        if gain.sum() > 0:
+            gain = gain / gain.sum()
+        importances.append(gain)
+        final_model = model
+
+    if not predictions or final_model is None:
+        raise ValueError("No rolling LightGBM predictions were produced.")
+
+    predictions = pd.concat(predictions, ignore_index=True)
+    predictions, overall, by_country = evaluate_predictions(predictions)
+    paths = save_evaluation(
+        predictions, overall, by_country, output_dir, prefix="lightgbm"
     )
 
-
-    # --------------------------------------------------------
-    # SAVE CURRENT TEST MONTH
-    # --------------------------------------------------------
-
-    result = pd.DataFrame(
+    importance_matrix = np.vstack(importances)
+    importance = pd.DataFrame(
         {
-            "date": (
-                test.loc[
-                    test_valid,
-                    DATE_COL
-                ].values
-            ),
-            "country": (
-                country_names.values
-            ),
-            "actual": (
-                y_test.values
-            ),
-            "prediction": (
-                predictions
-            ),
-            "train_start": (
-                train_start
-            ),
-            "train_end": (
-                train_end
-            ),
+            "feature": features,
+            "mean_importance": importance_matrix.mean(axis=0),
+            "importance_std": importance_matrix.std(axis=0),
         }
-    )
-
-
-    all_predictions.append(
-        result
-    )
-
+    ).sort_values("mean_importance", ascending=False)
+    importance_path = Path(output_dir) / "lightgbm_feature_importance.csv"
+    importance.to_csv(importance_path, index=False)
+    model_path = Path(output_dir) / "lightgbm_last_window.txt"
+    final_model.booster_.save_model(model_path)
+    config_path = Path(output_dir) / "lightgbm_run_config.json"
+    run_config = {
+        "model": "lightgbm",
+        "target": target,
+        "window_months": window_months,
+        "target_lags": target_lags,
+        "test_start_date": (
+            test_start.strftime("%Y-%m-%d") if test_start is not None else None
+        ),
+        "model_params": model_params,
+        "params_file": str(Path(params_file).resolve()) if params_file else None,
+    }
+    with config_path.open("w", encoding="utf-8") as file:
+        json.dump(run_config, file, indent=2)
+    paths["feature importance"] = importance_path
+    paths["last-window model"] = model_path
+    paths["run configuration"] = config_path
 
     print(
-        f"Test: {test_month.date()} | "
-        f"Train: {train_start.date()} "
-        f"to {train_end.date()} | "
-        f"N train: {len(X_train)} | "
-        f"N test: {len(X_test)}"
+        f"Dataset: {Path(data_path).resolve()}\n"
+        f"Target: {target}\n"
+        f"Predictors: {len(features)} ({len(lag_columns)} target lag(s))\n"
+        f"Rolling window: {window_months} months\n"
+        f"Test start: {test_start.date() if test_start is not None else 'all'}\n"
+        f"Out-of-sample months: {len(splits)}"
     )
+    print_evaluation("ROLLING LIGHTGBM RESULTS", overall, by_country, paths)
 
 
-# ============================================================
-# COMBINE ALL OUT-OF-SAMPLE PREDICTIONS
-# ============================================================
-
-if not all_predictions:
-    raise ValueError(
-        "No rolling-window predictions "
-        "were produced."
+if __name__ == "__main__":
+    args = parse_args()
+    main(
+        args.data,
+        args.output_dir,
+        args.window_months,
+        args.target_lags,
+        args.n_estimators,
+        args.params_file,
+        args.test_start_date,
     )
-
-
-predictions_df = pd.concat(
-    all_predictions,
-    ignore_index=True,
-)
-
-
-# ============================================================
-# ERRORS
-# ============================================================
-
-predictions_df[
-    "error"
-] = (
-    predictions_df["actual"]
-    - predictions_df["prediction"]
-)
-
-predictions_df[
-    "absolute_error"
-] = (
-    predictions_df["error"]
-    .abs()
-)
-
-predictions_df[
-    "squared_error"
-] = (
-    predictions_df["error"]
-    ** 2
-)
-
-
-# ============================================================
-# OVERALL PERFORMANCE
-# ============================================================
-
-mae = mean_absolute_error(
-    predictions_df["actual"],
-    predictions_df["prediction"],
-)
-
-rmse = np.sqrt(
-    mean_squared_error(
-        predictions_df["actual"],
-        predictions_df["prediction"],
-    )
-)
-
-
-print(
-    "\n========================================"
-)
-
-print(
-    "LIGHTGBM OUT-OF-SAMPLE RESULTS"
-)
-
-print(
-    "========================================"
-)
-
-print(
-    f"\nMAE:  {mae:.4f}"
-)
-
-print(
-    f"RMSE: {rmse:.4f}"
-)
-
-print(
-    f"N predictions: "
-    f"{len(predictions_df)}"
-)
-
-
-# ============================================================
-# COUNTRY-LEVEL PERFORMANCE
-# ============================================================
-
-country_results = []
-
-
-for country, group in (
-    predictions_df.groupby(
-        "country"
-    )
-):
-
-    country_mae = (
-        mean_absolute_error(
-            group["actual"],
-            group["prediction"],
-        )
-    )
-
-    country_rmse = np.sqrt(
-        mean_squared_error(
-            group["actual"],
-            group["prediction"],
-        )
-    )
-
-
-    country_results.append(
-        {
-            "country": country,
-            "MAE": country_mae,
-            "RMSE": country_rmse,
-            "N": len(group),
-        }
-    )
-
-
-country_results = pd.DataFrame(
-    country_results
-)
-
-country_results = (
-    country_results
-    .sort_values("RMSE")
-    .reset_index(drop=True)
-)
-
-
-print(
-    "\nCountry-level results:"
-)
-
-print(
-    country_results.to_string(
-        index=False
-    )
-)
-
-
-# ============================================================
-# SAVE RESULTS
-# ============================================================
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-
-predictions_df.to_csv(
-    OUTPUT_FILE,
-    index=False,
-)
-
-
-country_results.to_csv(
-    COUNTRY_METRICS_FILE,
-    index=False,
-)
-
-
-print(
-    "\n========================================"
-)
-
-print(
-    "FILES SAVED"
-)
-
-print(
-    "========================================"
-)
-
-print(
-    f"\nPredictions:"
-    f"\n{OUTPUT_FILE}"
-)
-
-print(
-    f"\nCountry metrics:"
-    f"\n{COUNTRY_METRICS_FILE}"
-)
