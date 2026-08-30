@@ -80,7 +80,6 @@ MONTHLY_FILENAME_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# Readable labels for the Google Trends categories and topics used in the thesis.
 CAT_MAP = {
     "3": "arts_entertainment", "5": "computers_electronics", "7": "finance",
     "8": "games", "11": "home_garden", "12": "business_industrial",
@@ -729,10 +728,7 @@ def combine_with_unemployment(panel, unemployment):
     )
 
 
-    # ========================================================
-    # INTERPOLATE ISOLATED ONE-MONTH UNEMPLOYMENT GAPS
-    # ========================================================
-
+    # Fill only isolated one-month gaps using the two neighbouring rates.
     grouped = combined.groupby(
         "country",
         sort=False
@@ -771,14 +767,6 @@ def combine_with_unemployment(panel, unemployment):
     )
 
 
-    # Isolated missing month:
-    #
-    # t-1 exists
-    # t missing
-    # t+1 exists
-    #
-    # -> interpolate using neighbours
-
     interpolated_values = (
         previous_rate
         + following_rate
@@ -815,25 +803,12 @@ def combine_with_unemployment(panel, unemployment):
     ]
 
 
-    # ========================================================
-    # REPORT REMAINING UNEMPLOYMENT GAPS
-    # ========================================================
-
     remaining_rate_gaps = combined.loc[
         combined["unemployment_rate"].isna(),
         ["date", "country"]
     ].copy()
 
-
-    # ========================================================
-    # AR(1) FEATURE
-    #
-    # unemployment_rate_lag1 = u_(t-1)
-    #
-    # Construct AFTER interpolation so an interpolated
-    # unemployment observation can correctly serve as t-1.
-    # ========================================================
-
+    # Build the lag after interpolation so an imputed rate can serve as t-1.
     grouped = combined.groupby(
         "country",
         sort=False
@@ -868,10 +843,6 @@ def combine_with_unemployment(panel, unemployment):
     )
 
 
-    # ========================================================
-    # TARGET
-    # ========================================================
-
     # The models explain the monthly change, while the lagged unemployment
     # level remains available for the random walk and level AR(1) benchmark.
     target_column = UNEMPLOYMENT_TARGET_COLUMN
@@ -884,10 +855,6 @@ def combine_with_unemployment(panel, unemployment):
     # it among the predictors would create direct look-ahead bias.
     combined = combined.drop(columns=[UNEMPLOYMENT_LEVEL_COLUMN])
 
-
-    # ========================================================
-    # DROP ROWS WITHOUT TARGET OR AR(1)
-    # ========================================================
 
     before_drop = len(
         combined

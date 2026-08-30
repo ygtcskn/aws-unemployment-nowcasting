@@ -9,7 +9,6 @@ identity = sts.get_caller_identity()
 print("AWS connection successful")
 print('ARN:', identity["Arn"])
 
-# AWS configuration
 BUCKET_NAME = "aws-unemp-nowcast-ygtcskn"
 REGION = "eu-central-1"
 
@@ -21,21 +20,15 @@ s3.create_bucket(Bucket=BUCKET_NAME,
 
 print(f"Bucket {BUCKET_NAME} created")
 
-# Local data
 LOCAL_DIR = Path("data/raw/google_trends")
 
-# S3 destination
 S3_PREFIX = "raw/google_trends"
 
-# Connect to S3
 s3 = boto3.client("s3", region_name=REGION)
 
-# Find all CSV files
 csv_files = sorted(LOCAL_DIR.rglob("*.csv"))
 
 print(f"Found {len(csv_files)} CSV files.")
-
-# Upload each file to S3
 
 for i, file_path in enumerate(csv_files, start=1):
 
