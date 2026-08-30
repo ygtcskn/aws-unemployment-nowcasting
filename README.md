@@ -2,24 +2,24 @@
 
 Can Google search activity help us understand changes in unemployment before the official data is fully available? In this project, I use Google Trends indicators to forecast the monthly change in the unemployment rate.
 
-This is also an **AWS practice project**. I opened an AWS Free Tier account, created an **Amazon S3** bucket and uploaded the raw Google Trends files. I then used an **Amazon EC2** instance to run the full Python pipeline: data preparation, hyperparameter tuning, model estimation and evaluation. The code connects to S3 with `boto3`, while AWS credentials are excluded from Git.
+This is also an **AWS practice project**. I opened an AWS Free Tier account and stored both the Google Trends files and OECD unemployment data in **Amazon S3**. I then used an **Amazon EC2** instance to run the full Python pipeline: data preparation, hyperparameter tuning, model estimation and evaluation. The code connects to S3 with `boto3`, while AWS credentials are excluded from Git.
 
-## AWS workflow
+## AWS setup
 
-```mermaid
-flowchart LR
-    A[Google Trends CSV files] --> B[Amazon S3<br/>raw/google_trends]
-    B --> C[Amazon EC2<br/>Python environment]
-    D[OECD unemployment data] --> C
-    C --> E[Preprocessing and panel construction]
-    E --> F[Optuna tuning]
-    F --> G[XGBoost and LightGBM]
-    E --> H[AR and Random Walk benchmarks]
-    G --> I[Reports, figures and Excel table]
-    H --> I
-```
+The EC2 instance was configured as follows:
 
-The script [`scripts/upload_raw_to_s3.py`](scripts/upload_raw_to_s3.py) creates the S3 bucket in `eu-central-1` and uploads the Google Trends CSV files. The EC2 pipeline then reads these files directly from S3.
+| Component | Configuration |
+|---|---|
+| Instance type | `m7i-flex.large` |
+| Compute | 2 vCPUs (1 core and 2 threads) |
+| Memory | 8 GiB RAM |
+| Processor | Intel architecture, up to 3.2 GHz |
+| Storage | 30 GB `gp3` EBS volume |
+| Storage performance | 3,000 IOPS; EBS optimized |
+| Availability Zone | `eu-central-1c` |
+| IAM instance profile | `aws-unemployment-nowcasting-role` |
+
+The script [`scripts/upload_raw_to_s3.py`](scripts/upload_raw_to_s3.py) creates the S3 bucket in `eu-central-1` and uploads the Google Trends CSV files. The OECD unemployment file was also stored in S3 and copied to the expected input path on EC2 before running the pipeline.
 
 I use part of the dataset that I collected for my master's thesis in Economics. The sample includes nine countries: **Australia, Canada, France, Germany, Italy, Japan, South Korea, the United Kingdom and the United States**.
 
@@ -64,7 +64,7 @@ First, the raw Google Trends files can be uploaded from the computer where they 
 python scripts/upload_raw_to_s3.py
 ```
 
-After cloning the repository on an EC2 instance, configure AWS access and place the OECD unemployment file at `data/raw/unemp/unemp_raw.csv`. Then run:
+After cloning the repository on EC2, configure AWS access and copy the OECD unemployment file from S3 to `data/raw/unemp/unemp_raw.csv`. Then run:
 
 ```bash
 python -m venv .venv
