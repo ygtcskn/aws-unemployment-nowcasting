@@ -54,7 +54,7 @@ The table reports results for the final test period using the same 216 country-m
 | 3 | XGBoost | 0.1377 | 0.1012 | 2.27% |
 | 4 | AR(1) | 0.1539 | 0.1071 | 2.38% |
 
-Random Walk performs best in this test period. LightGBM is close, but neither machine-learning model beats the simplest benchmark. This is still an important result: a more complicated model does not necessarily produce a better forecast, so economic benchmarks should always be included.
+Random Walk performs best in this test period. LightGBM is close, but neither machine-learning model beats the simplest benchmark.
 
 ## Reproduce on EC2
 
